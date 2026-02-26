@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Particle System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        #video-preview { 
+            position: absolute; bottom: 20px; right: 20px; 
+            width: 200px; height: 150px; border-radius: 12px;
+            border: 2px solid rgba(255,255,255,0.2); 
+            transform: scaleX(-1); overflow: hidden; z-index: 10;
+        }
+        #ui {
+            position: absolute; top: 20px; left: 20px; color: white;
+            z-index: 10; pointer-events: none; text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+        .label { font-size: 12px; opacity: 0.6; text-transform: uppercase; letter-spacing: 1px; }
+        .value { font-size: 18px; font-weight: bold; margin-bottom: 10px; color: #00f2ff; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <div class="label">Current Shape</div>
+        <div id="shape-name" class="value">Sphere</div>
+        <div class="label">Tracking Status</div>
+        <div id="status" class="value" style="color: #ff3e3e;">Searching for Hand...</div>
+    </div>
+    
+    <video id="input_video" style="display:none;"></video>
+    <div id="video-preview">
+        <video id="guide_video" autoplay playsinline muted style="width: 100%; height: 100%; object-fit: cover;"></video>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    
+    <script type="importmap">
+    { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Global Settings ---
+        const PARTICLE_COUNT = 25000;
+        let handX = 0, handY = 0, expansion = 1.0;
+        let currentTargetArr;
+
+        // --- 1. Generate Shape Templates ---
+        const sphereTarget = new Float32Array(PARTICLE_COUNT * 3);
+        const heartTarget = new Float32Array(PARTICLE_COUNT * 3);
+        const saturnTarget = new Float32Array(PARTICLE_COUNT * 3);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const i3 = i * 3;
+            // Sphere
+            const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+            const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+            sphereTarget[i3] = Math.cos(theta) * Math.sin(phi) * 5;
+            sphereTarget[i3+1] = Math.sin(theta) * Math.sin(phi) * 5;
+            sphereTarget[i3+2] = Math.cos(phi) * 5;
+
+            // Heart
+            const t = Math.random() * Math.PI * 2;
+            heartTarget[i3] = (16 * Math.pow(Math.sin(t), 3)) * 0.35;
+            heartTarget[i3+1] = (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * 0.35;
+            heartTarget[i3+2] = (Math.random() - 0.5) * 2;
+
+            // Saturn
+            if (i < PARTICLE_COUNT * 0.6) {
+                const sPhi = Math.acos(-1 + (2 * i) / (PARTICLE_COUNT * 0.6));
+                const sTheta = Math.sqrt(PARTICLE_COUNT * 0.6 * Math.PI) * sPhi;
+                saturnTarget[i3] = Math.cos(sTheta) * Math.sin(sPhi) * 4;
+                saturnTarget[i3+1] = Math.sin(sTheta) * Math.sin(sPhi) * 4;
+                saturnTarget[i3+2] = Math.cos(sPhi) * 4;
+            } else {
+                const angle = Math.random() * Math.PI * 2;
+                const r = 6.5 + Math.random() * 2.5;
+                saturnTarget[i3] = Math.cos(angle) * r;
+                saturnTarget[i3+1] = (Math.random() - 0.5) * 0.4;
+                saturnTarget[i3+2] = Math.sin(angle) * r;
+            }
+        }
+        currentTargetArr = sphereTarget;
+
+        // --- 2. Three.js Scene Setup ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const geo = new THREE.BufferGeometry();
+        const posArray = new Float32Array(PARTICLE_COUNT * 3);
+        const colArray = new Float32Array(PARTICLE_COUNT * 3);
+
+        for(let i=0; i < PARTICLE_COUNT * 3; i++) {
+            posArray[i] = (Math.random() - 0.5) * 50;
+            colArray[i] = Math.random();
+        }
+
+        geo.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(colArray, 3));
+
+        const loader = new THREE.TextureLoader();
+        // Using a high-quality disc sprite for the "glow" look
+        const sprite = loader.load('https://threejs.org/examples/textures/sprites/disc.png');
+
+        const mat = new THREE.PointsMaterial({
+            size: 0.08,
+            map: sprite,
+            vertexColors: true,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            opacity: 0.8
+        });
+
+        const points = new THREE.Points(geo, mat);
+        scene.add(points);
+        camera.position.z = 18;
+
+        // --- 3. Hand Tracking Logic ---
+        const videoElement = document.getElementById('input_video');
+        const guideVideo = document.getElementById('guide_video');
+        const statusEl = document.getElementById('status');
+        const shapeNameEl = document.getElementById('shape-name');
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.6 });
+
+        hands.onResults((results) => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                statusEl.innerText = "Tracking Active";
+                statusEl.style.color = "#00f2ff";
+                
+                const lm = results.multiHandLandmarks[0];
+                
+                // Movement Mapping
+                handX = (lm[8].x - 0.5) * -35; 
+                handY = (lm[8].y - 0.5) * -25;
+
+                // Zoom Mapping (Pinch distance)
+                const dist = Math.hypot(lm[8].x - lm[4].x, lm[8].y - lm[4].y);
+                expansion = THREE.MathUtils.lerp(expansion, dist * 8, 0.2);
+
+                // Shape Switching Logic
+                if (lm[8].y < 0.2) { 
+                    currentTargetArr = saturnTarget; 
+                    shapeNameEl.innerText = "Saturn";
+                } else if (lm[12].y > 0.8) { 
+                    currentTargetArr = heartTarget; 
+                    shapeNameEl.innerText = "Heart";
+                } else if (lm[4].x > 0.8 || lm[4].x < 0.2) {
+                    currentTargetArr = sphereTarget;
+                    shapeNameEl.innerText = "Sphere";
+                }
+            } else {
+                statusEl.innerText = "Searching for Hand...";
+                statusEl.style.color = "#ff3e3e";
+            }
+        });
+
+        const cam = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+                if(!guideVideo.srcObject) guideVideo.srcObject = videoElement.srcObject;
+            },
+            width: 640, height: 480
+        });
+        cam.start();
+
+        // --- 4. Animation Loop ---
+        const colorObj = new THREE.Color();
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const positions = points.geometry.attributes.position.array;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                
+                // The "Video" Animation Logic:
+                // Target = (Shape Coordinate * Hand Zoom) + Hand Position
+                const tx = (currentTargetArr[i3] * expansion) + handX;
+                const ty = (currentTargetArr[i3+1] * expansion) + handY;
+                const tz = (currentTargetArr[i3+2] * expansion);
+
+                // Smooth Morphing (Lerp)
+                positions[i3] += (tx - positions[i3]) * 0.08;
+                positions[i3+1] += (ty - positions[i3+1]) * 0.08;
+                positions[i3+2] += (tz - positions[i3+2]) * 0.08;
+            }
+            
+            points.geometry.attributes.position.needsUpdate = true;
+            points.rotation.y += 0.003; // Atmospheric rotation
+            
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
